@@ -15,7 +15,6 @@ import torch
 from .. import config, ir, scheduler
 from ..ir import ReductionHint
 from ..utils import (
-    free_symbol_startswith,
     get_fused_kernel_name,
     instance_descriptor,
     sympy_product,
@@ -676,10 +675,6 @@ class TritonKernel(Kernel):
         itervars = list(itertools.chain(*self.set_ranges(*new_ranges)))
         return [[fn(itervars) for fn in fns] for fns in return_getters_groups]
 
-    def is_indirect_indexing(self, index: sympy.Expr):
-        # tmpX  means indirect indexing
-        return free_symbol_startswith(index, "tmp")
-
     def combine_contiguous_dims(self, index: sympy.Expr, tree: IterationRangesRoot):
         """
         More aggressive simplification to merge contiguous dims
@@ -702,7 +697,6 @@ class TritonKernel(Kernel):
         self,
         index: sympy.Expr,
         *,
-        copy_shape=None,
         dense_indexing=False,
     ):
         """
@@ -730,34 +724,17 @@ class TritonKernel(Kernel):
         ) and index != 0
 
         have_dense = True
-        have_loop_vars = False
-        dense_mask = set()
-
         for tree in self.range_trees:
             if tree.prefix == "r" and not self.inside_reduction:
                 continue
             if index_vars.intersection(tree.var_list):
-                have_loop_vars = True
                 have_dense = False
-            dense_mask.add(f"{tree.prefix}mask")
 
         if (need_dense and not have_dense) or isinstance(index, sympy.Integer):
             index_str = f"{index_str} + tl.zeros({self.dense_size_str()}, tl.int32)"
-            if isinstance(index, sympy.Integer):
-                return index_str, set(), "None"
-            else:
-                mask_vars = dense_mask
-        elif not have_loop_vars and copy_shape:
-            mask_vars = dense_mask
-            index_str = f"{index_str} + tl.zeros({copy_shape}.shape, tl.int32)"
 
         if self._load_mask:
             mask_vars.add(self._load_mask)
-
-        if mask_vars == {"xmask"} and index == 0 and self.range_trees[0].numel == 1:
-            # This causes a triton error:
-            # https://github.com/openai/triton/issues/633
-            mask_vars = set()
 
         mask_str = " & ".join(sorted(map(str, mask_vars))) if mask_vars else "None"
         return index_str, mask_vars, mask_str
@@ -791,7 +768,6 @@ class TritonKernel(Kernel):
 
     def load(self, name: str, index: sympy.Expr):
         var = self.args.input(name)
-        indirect_indexing = self.is_indirect_indexing(index)
         index, mask_vars, mask = self.indexing(index)
 
         if "rmask" in mask:
