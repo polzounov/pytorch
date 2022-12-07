@@ -3,6 +3,7 @@ import enum
 import functools
 import inspect
 import itertools
+import torch
 import types
 from typing import Dict, List
 
@@ -13,6 +14,8 @@ from ..source import AttrSource, GetItemSource
 from ..utils import make_cell
 from .base import typestr, VariableTracker
 
+# todo annotate types
+default_tensor_values = {}
 
 def wrap_bound_arg(val, options):
     if isinstance(val, dict):
@@ -29,6 +32,8 @@ def wrap_bound_arg(val, options):
     elif isinstance(val, enum.Enum):
         return variables.EnumVariable(val, **options)
     elif isinstance(val, (type, abc.ABCMeta)):
+        return variables.UserDefinedClassVariable(val, **options)
+    elif isinstance(val, torch.Tensor):
         return variables.UserDefinedClassVariable(val, **options)
     else:
         assert isinstance(val, VariableTracker), typestr(val)
