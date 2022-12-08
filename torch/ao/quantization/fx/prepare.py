@@ -86,6 +86,7 @@ from ..utils import (
     _get_qconfig_dtypes,
     _get_swapped_custom_module_class,
     _activation_is_statically_quantized,
+    _activation_is_int8_quantized,
 )
 
 from ..backend_config.utils import (
