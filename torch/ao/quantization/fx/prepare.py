@@ -67,14 +67,14 @@ from .utils import (
     _is_custom_module_lstm,
     _maybe_get_custom_module_lstm_from_node_arg,
     _qconfig_satisfies_dtype_config_constraints,
-    get_custom_module_class_keys,
-    all_node_args_have_no_tensors,
-    assert_and_get_unique_device,
-    get_non_observable_arg_indexes_and_types,
-    get_new_attr_name_with_prefix,
-    node_arg_is_weight,
-    node_arg_is_bias,
-    NON_QUANTIZABLE_WEIGHT_OPS,
+    _get_custom_module_class_keys,
+    _all_node_args_have_no_tensors,
+    _assert_and_get_unique_device,
+    _get_non_observable_arg_indexes_and_types,
+    _get_new_attr_name_with_prefix,
+    _node_arg_is_weight,
+    _node_arg_is_bias,
+    _NON_QUANTIZABLE_WEIGHT_OPS,
 )
 
 from torch.ao.quantization.quantize import (
@@ -118,7 +118,7 @@ __all__ = [
 # list of dtypes to not add observers to
 _DO_NOT_OBS_DTYPE_LIST = [int, float, torch.bool, None]
 
-def _is_activation_post_process_node(node: Node, modules: Dict[str, torch.nn.Module]) -> bool:
+def is_activation_post_process_node(node: Node, modules: Dict[str, torch.nn.Module]) -> bool:
     return isinstance(node, torch.fx.Node) and node.op == "call_module" and \
         is_activation_post_process(modules[str(node.target)])
 
@@ -140,8 +140,8 @@ def _is_input_arg_dtype_supported_by_backend(
     if not isinstance(arg, Node):
         return True
     # TODO: support check for standalone module
-    is_weight = node_arg_is_weight(node, arg, backend_config)
-    is_bias = node_arg_is_bias(node, arg, backend_config)
+    is_weight = _node_arg_is_weight(node, arg, backend_config)
+    is_bias = _node_arg_is_bias(node, arg, backend_config)
     is_activation = not is_weight and not is_bias
     if is_activation:
         qconfig_info = node_name_to_target_dtype_info[node.name].get(
@@ -283,7 +283,7 @@ def _insert_observer(
     Attaches `observer` to `model`, and creates a node which calls
     `observer` on the output of `node`.
     """
-    model_device = assert_and_get_unique_device(model)
+    model_device = _assert_and_get_unique_device(model)
     if model_device:
         observer.to(model_device)
     # add observer module as attribute
@@ -291,7 +291,7 @@ def _insert_observer(
         prefix = node.name + '_equalization_process_'
     else:
         prefix = 'activation_post_process_'
-    get_new_observer_name = get_new_attr_name_with_prefix(prefix)
+    get_new_observer_name = _get_new_attr_name_with_prefix(prefix)
     observer_name = get_new_observer_name(model)
     setattr(model, observer_name, observer)
     modules[observer_name] = observer
@@ -353,7 +353,7 @@ def _get_target_activation_dtype_for_node(
 
     elif node.op in ('call_module', 'call_method', 'call_function'):
         args_have_no_tensors = \
-            all_node_args_have_no_tensors(
+            _all_node_args_have_no_tensors(
                 node, modules, cache_for_no_tensor_check)
         if args_have_no_tensors:
             return {
@@ -445,7 +445,7 @@ def _get_arg_target_dtype_as_output(
     custom_module_lstm_node = _maybe_get_custom_module_lstm_from_node_arg(arg, modules)
     if custom_module_lstm_node is not None:
         return node_name_to_target_dtype_info[custom_module_lstm_node.name]["output_activation_dtype"][0]  # type: ignore[index]
-    elif _is_activation_post_process_node(arg, modules):
+    elif is_activation_post_process_node(arg, modules):
         observed_arg = arg.args[0]
         assert isinstance(observed_arg, Node), "Currently we only support observing Node"
         return node_name_to_target_dtype_info[observed_arg.name]["output_activation_dtype"][0]  # type: ignore[index]
@@ -468,13 +468,13 @@ def _get_arg_target_dtype_as_input_to_node(
     to node `node`
     """
     assert isinstance(arg, Node)
-    is_weight = node_arg_is_weight(node, arg, backend_config)
-    is_bias = node_arg_is_bias(node, arg, backend_config)
+    is_weight = _node_arg_is_weight(node, arg, backend_config)
+    is_bias = _node_arg_is_bias(node, arg, backend_config)
     is_activation = not is_weight and not is_bias
     if is_activation:
         return node_name_to_target_dtype_info[node.name]["input_activation_dtype"][0]  # type: ignore[index]
     elif is_weight:
-        if node.target in NON_QUANTIZABLE_WEIGHT_OPS:
+        if node.target in _NON_QUANTIZABLE_WEIGHT_OPS:
             return None
         else:
             return node_name_to_target_dtype_info[node.name]["weight_dtype"][0]  # type: ignore[index]
@@ -492,8 +492,8 @@ def _get_arg_target_is_dynamic_as_input_to_node(
     to node `node`
     """
     assert isinstance(arg, Node)
-    is_weight = node_arg_is_weight(node, arg, backend_config)
-    is_bias = node_arg_is_bias(node, arg, backend_config)
+    is_weight = _node_arg_is_weight(node, arg, backend_config)
+    is_bias = _node_arg_is_bias(node, arg, backend_config)
     is_activation = not is_weight and not is_bias
     if is_activation and \
        "input_activation_dtype" in node_name_to_target_dtype_info[node.name]:
@@ -541,7 +541,7 @@ def _maybe_insert_input_observer_for_arg_or_kwarg(
     assert qconfig is not None
     if not is_standalone_module:
         # regular flow for most nodes, except standalone modules
-        is_weight = node_arg_is_weight(node, arg, backend_config)
+        is_weight = _node_arg_is_weight(node, arg, backend_config)
 
         _is_reuse_input_qconfig_ = _is_reuse_input_qconfig(qconfig)
 
@@ -725,11 +725,11 @@ def _maybe_insert_input_equalization_observers_for_node(
 
     new_args = []
     for arg in node.args:
-        if not isinstance(arg, Node) or node_arg_is_bias(node, arg, backend_config):
+        if not isinstance(arg, Node) or _node_arg_is_bias(node, arg, backend_config):
             new_args.append(arg)
             continue
 
-        is_weight = node_arg_is_weight(node, arg, backend_config)
+        is_weight = _node_arg_is_weight(node, arg, backend_config)
 
         act_eq_process_ctr = equalization_qconfig.weight if is_weight else \
             equalization_qconfig.input_activation
@@ -928,10 +928,10 @@ def propagate_dtypes_for_known_nodes(
     replace this with a better way to reason about dtypes of tensors.
     """
     for node in graph.nodes:
-        non_observable_arg_dict = get_non_observable_arg_indexes_and_types(node)
+        _NON_OBSERVABLE_ARG_DICT = _get_non_observable_arg_indexes_and_types(node)
 
-        for arg_type in non_observable_arg_dict:
-            non_observable_indices = non_observable_arg_dict[arg_type](node)
+        for arg_type in _NON_OBSERVABLE_ARG_DICT:
+            non_observable_indices = _NON_OBSERVABLE_ARG_DICT[arg_type](node)
 
             for index in non_observable_indices:
                 arg = node.args[index]
@@ -990,7 +990,7 @@ def _maybe_make_input_output_share_observers(
     #   observed_node -> non_observed_node -> cat
     # we need to navigate up to the first observer
     iteration_guard = 0
-    while not _is_activation_post_process_node(first_arg_arg, modules):
+    while not is_activation_post_process_node(first_arg_arg, modules):
         if not isinstance(first_arg_arg, Node):
             return False
         # did not find an activation_post_process for the op
@@ -1021,7 +1021,7 @@ def _maybe_make_input_output_share_observers(
             if input_idx == 0:
                 continue
             iteration_guard = 0
-            while not _is_activation_post_process_node(input_arg, modules):
+            while not is_activation_post_process_node(input_arg, modules):
                 # failed to trace back since no input arg for the current node
                 if len(input_arg.args) < 1:
                     return False
@@ -1035,7 +1035,7 @@ def _maybe_make_input_output_share_observers(
 
     # set the output observer node to use that module
     for output_obs_node, _ in node.users.items():
-        assert _is_activation_post_process_node(output_obs_node, modules)
+        assert is_activation_post_process_node(output_obs_node, modules)
         parent_name, name = _parent_name(output_obs_node.target)
         setattr(modules[parent_name], name, obs_mod_to_use)
 
@@ -1048,7 +1048,7 @@ def _remove_output_observer(
         modules: Dict[str, torch.nn.Module]):
     items = list(node.users.items())
     for output_obs_node, _ in items:
-        assert _is_activation_post_process_node(output_obs_node, modules)
+        assert is_activation_post_process_node(output_obs_node, modules)
         output_obs_node.replace_all_uses_with(node)
         model.graph.erase_node(output_obs_node)  # type: ignore[union-attr, operator]
 
@@ -1516,8 +1516,8 @@ def prepare(
     standalone_module_names = list(prepare_custom_config.standalone_module_names.keys())
     standalone_module_classes = list(prepare_custom_config.standalone_module_classes.keys())
 
-    custom_module_classes = get_custom_module_class_keys(prepare_custom_config.float_to_observed_mapping)
-    matches_without_qconfig = find_matches(
+    custom_module_classes = _get_custom_module_class_keys(prepare_custom_config.float_to_observed_mapping)
+    matches_without_qconfig = _find_matches(
         model.graph, modules, pattern_to_quantize_handler, root_node_getter_mapping,
         standalone_module_names, standalone_module_classes, custom_module_classes)
 

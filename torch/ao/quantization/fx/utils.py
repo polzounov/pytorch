@@ -45,32 +45,12 @@ import warnings
 
 # TODO: revisit this list. Many helper methods shouldn't be public
 __all__ = [
-    "all_node_args_except_first",
-    "all_node_args_have_no_tensors",
-    "assert_and_get_unique_device",
-    "collect_producer_nodes",
-    "create_getattr_from_value",
-    "create_node_from_old_node_preserve_meta",
-    "EMPTY_ARG_DICT",
-    "get_custom_module_class_keys",
-    "get_linear_prepack_op_for_dtype",
-    "get_new_attr_name_with_prefix",
-    "get_non_observable_arg_indexes_and_types",
-    "get_qconv_prepack_op",
-    "get_skipped_module_name_and_classes",
-    "graph_module_from_producer_nodes",
-    "maybe_get_next_module",
-    "NodeInfo",
-    "node_arg_is_bias",
-    "node_arg_is_weight",
-    "NON_OBSERVABLE_ARG_DICT",
-    "NON_QUANTIZABLE_WEIGHT_OPS",
-    "return_arg_list",
+    "graph_pretty_str",
 ]
 
-NON_QUANTIZABLE_WEIGHT_OPS = {torch.nn.functional.layer_norm, torch.nn.functional.group_norm, torch.nn.functional.instance_norm}
+_NON_QUANTIZABLE_WEIGHT_OPS = {torch.nn.functional.layer_norm, torch.nn.functional.group_norm, torch.nn.functional.instance_norm}
 
-def node_arg_is_weight(node: Node, arg: Any, backend_config: BackendConfig) -> bool:
+def _node_arg_is_weight(node: Node, arg: Any, backend_config: BackendConfig) -> bool:
     """Returns if node arg is weight"""
     if isinstance(node, Node) and node.op == "call_function" and node.target in backend_config.configs:
         weight_index = backend_config.configs[node.target]._input_type_to_index.get("weight")
@@ -79,7 +59,7 @@ def node_arg_is_weight(node: Node, arg: Any, backend_config: BackendConfig) -> b
         return node.kwargs.get("weight") is arg
     return False
 
-def node_arg_is_bias(node: Node, arg: Any, backend_config: BackendConfig) -> bool:
+def _node_arg_is_bias(node: Node, arg: Any, backend_config: BackendConfig) -> bool:
     """Returns if node arg is bias"""
     if isinstance(node, Node) and node.op == "call_function" and node.target in backend_config.configs:
         bias_index = backend_config.configs[node.target]._input_type_to_index.get("bias")
@@ -88,7 +68,85 @@ def node_arg_is_bias(node: Node, arg: Any, backend_config: BackendConfig) -> boo
         return node.kwargs.get("bias") is arg
     return False
 
-def get_custom_module_class_keys(custom_module_mapping: Dict[QuantType, Dict[Type, Type]]) -> List[Any]:
+def graph_pretty_str(g, shorten=True) -> str:
+    """Returns a printable representation of the ops in the graph of g.
+    If shorten is True, tries to abbreviate fields.
+    """
+    built_in_func_re = re.compile('<built-in function (.*)>')
+    built_in_meth_re = re.compile('<built-in method (.*) of type.*>')
+    op_dict = {
+        'placeholder': 'plchdr',
+        'get_attr': 'gt_prm',
+        'call_function': 'cl_fun',
+        'call_module': 'cl_mod',
+        'call_method': 'cl_meth',
+    }
+
+    max_lens = {}
+    col_names = ("name", "op", "target", "args", "kwargs")
+    for s in col_names:
+        max_lens[s] = len(s)
+
+    results = []
+    for n in g.nodes:
+
+        # activation_post_process_0 -> obs_0
+        name = str(n.name)
+        if shorten:
+            name = name.replace("activation_post_process", "obs")
+
+        op = str(n.op)
+        # placeholder -> plchdr, and so on
+        if shorten and op in op_dict:
+            op = op_dict[op]
+
+        target = str(n.target)
+        # <built-in function foo> -> <bi_fun foo>, and so on
+        if shorten:
+            built_in_func = built_in_func_re.search(target)
+            if built_in_func:
+                target = f"<bi_fun {built_in_func.group(1)}>"
+            built_in_meth = built_in_meth_re.search(target)
+            if built_in_meth:
+                target = f"<bi_meth {built_in_meth.group(1)}>"
+            target = target.replace("activation_post_process", "obs")
+
+        args = str(n.args)
+        if shorten:
+            args = args.replace("activation_post_process", "obs")
+
+        kwargs = str(n.kwargs)
+
+        # calculate maximum length of each column, so we can tabulate properly
+        for k, v in zip(col_names, (name, op, target, args, kwargs)):
+            max_lens[k] = max(max_lens[k], len(v))
+        results.append([name, op, target, args, kwargs])
+
+    res_str = ""
+    format_str = "{:<{name}} {:<{op}} {:<{target}} {:<{args}} {:<{kwargs}}\n"
+    res_str += format_str.format(*col_names, **max_lens)
+    for result in results:
+        res_str += format_str.format(*result, **max_lens)
+
+    # print an exra note on abbreviations which change attribute names,
+    # since users will have to un-abbreviate for further debugging
+    if shorten:
+        res_str += "*obs_{n} = activation_post_process_{n}\n"
+    return res_str
+
+def _get_per_tensor_qparams(activation_post_process):
+    assert _is_per_tensor(activation_post_process.qscheme), 'Only per tensor quantization is supported'
+    scale, zero_point = activation_post_process.calculate_qparams()
+    scale = float(scale)
+    zero_point = int(zero_point)
+    dtype = activation_post_process.dtype
+    return scale, zero_point, dtype
+
+# Keep it here for BC in torch.quantization namespace, we can remove it after
+# we deprecate the torch.quantization namespace
+quantize_node = NotImplemented
+
+def _get_custom_module_class_keys(custom_module_mapping: Dict[QuantType, Dict[Type, Type]]) -> List[Any]:
     r""" Get all the unique custom module keys in the custom config dict
     e.g.
     Input:
@@ -116,7 +174,7 @@ def get_custom_module_class_keys(custom_module_mapping: Dict[QuantType, Dict[Typ
         float_custom_module_classes |= quant_mode_custom_module_classes
     return list(float_custom_module_classes)
 
-def get_linear_prepack_op_for_dtype(dtype):
+def _get_linear_prepack_op_for_dtype(dtype):
     if dtype == torch.float16:
         return torch.ops.quantized.linear_prepack_fp16
     elif dtype == torch.qint8:
@@ -124,7 +182,7 @@ def get_linear_prepack_op_for_dtype(dtype):
     else:
         raise Exception("can't get linear prepack op for dtype:", dtype)
 
-def get_qconv_prepack_op(conv_op: Callable) -> Callable:
+def _get_qconv_prepack_op(conv_op: Callable) -> Callable:
     prepack_ops = {
         torch.nn.functional.conv1d: torch.ops.quantized.conv1d_prepack,
         torch.nn.functional.conv2d: torch.ops.quantized.conv2d_prepack,
@@ -134,12 +192,30 @@ def get_qconv_prepack_op(conv_op: Callable) -> Callable:
     assert prepack_op, "Didn't find prepack op for {}".format(conv_op)
     return prepack_op
 
+def _get_qconv_op(conv_op: Callable, has_relu: bool) -> Callable:
+    qconv_op = {
+        # has relu
+        True: {
+            torch.nn.functional.conv1d: torch.ops.quantized.conv1d_relu,
+            torch.nn.functional.conv2d: torch.ops.quantized.conv2d_relu,
+            torch.nn.functional.conv3d: torch.ops.quantized.conv3d_relu
+        },
+        False: {
+            torch.nn.functional.conv1d: torch.ops.quantized.conv1d,
+            torch.nn.functional.conv2d: torch.ops.quantized.conv2d,
+            torch.nn.functional.conv3d: torch.ops.quantized.conv3d
+        }
+    }
+    qconv = qconv_op[has_relu].get(conv_op)
+    assert qconv, "Can't find corresponding quantized conv op for {} {}".format(conv_op, has_relu)
+    return qconv
+
 # Returns a function that can get a new attribute name for module with given
 # prefix, for example,
-# >> get_new_observer_name = get_new_attr_name_with_prefix('_observer')
+# >> get_new_observer_name = _get_new_attr_name_with_prefix('_observer')
 # >> new_name = get_new_observer_name(module)
 # new_name will be an unused attribute name on module, e.g. `_observer_1`
-def get_new_attr_name_with_prefix(prefix: str) -> Callable:
+def _get_new_attr_name_with_prefix(prefix: str) -> Callable:
     prefix = prefix.replace(".", "_")
 
     def get_new_attr_name(module: torch.nn.Module):
@@ -153,14 +229,14 @@ def get_new_attr_name_with_prefix(prefix: str) -> Callable:
         return attr_name
     return get_new_attr_name
 
-def collect_producer_nodes(node: Node) -> Optional[List[Node]]:
+def _collect_producer_nodes(node: Node) -> Optional[List[Node]]:
     r''' Starting from a target node, trace back until we hit inpu or
     getattr node. This is used to extract the chain of operators
     starting from getattr to the target node, for example
     def forward(self, x):
       observed = self.observer(self.weight)
       return F.linear(x, observed)
-    collect_producer_nodes(observed) will either return a list of nodes that
+    _collect_producer_nodes(observed) will either return a list of nodes that
     produces the observed node or None if we can't extract a self contained
     graph without free variables(inputs of the forward function).
     '''
@@ -180,10 +256,10 @@ def collect_producer_nodes(node: Node) -> Optional[List[Node]]:
                 frontier.append(arg)
     return nodes
 
-def graph_module_from_producer_nodes(
+def _graph_module_from_producer_nodes(
         root: GraphModule, producer_nodes: List[Node]) -> GraphModule:
     r''' Construct a graph module from extracted producer nodes
-    from `collect_producer_nodes` function
+    from `_collect_producer_nodes` function
     Args:
       root: the root module for the original graph
       producer_nodes: a list of nodes we use to construct the graph
@@ -204,7 +280,7 @@ def graph_module_from_producer_nodes(
     graph_module = GraphModule(root, graph)
     return graph_module
 
-def assert_and_get_unique_device(module: torch.nn.Module) -> Any:
+def _assert_and_get_unique_device(module: torch.nn.Module) -> Any:
     """
     Returns the unique device for a module, or None if no device is found.
     Throws an error if multiple devices are detected.
@@ -218,14 +294,14 @@ def assert_and_get_unique_device(module: torch.nn.Module) -> Any:
     device = next(iter(devices)) if len(devices) > 0 else None
     return device
 
-def create_getattr_from_value(module: torch.nn.Module, graph: Graph, prefix: str, value: Any) -> Node:
+def _create_getattr_from_value(module: torch.nn.Module, graph: Graph, prefix: str, value: Any) -> Node:
     """
     Given a value of any type, creates a getattr node corresponding to the value and
     registers the value as a buffer to the module.
     """
-    get_new_attr_name = get_new_attr_name_with_prefix(prefix)
+    get_new_attr_name = _get_new_attr_name_with_prefix(prefix)
     attr_name = get_new_attr_name(module)
-    device = assert_and_get_unique_device(module)
+    device = _assert_and_get_unique_device(module)
     new_value = value.clone().detach() if isinstance(value, torch.Tensor) \
         else torch.tensor(value, device=device)
     module.register_buffer(attr_name, new_value)
@@ -233,7 +309,26 @@ def create_getattr_from_value(module: torch.nn.Module, graph: Graph, prefix: str
     attr_node = graph.create_node("get_attr", attr_name)
     return attr_node
 
-def all_node_args_have_no_tensors(node: Node, modules: Dict[str, torch.nn.Module], cache: Dict[Node, bool]) -> bool:
+def _create_qparam_nodes(
+        node_name: str,
+        scale: Any,
+        zero_point: Any,
+        modules: Dict[str, torch.nn.Module],
+        quantized_graph: Graph,
+        node_name_to_scope: Dict[str, Tuple[str, type]]
+) -> Tuple[Node, Node]:
+    """
+    Create getattr nodes in the quantized graph for scale and zero point values.
+    The nodes are registered with the root_module of the model.
+    """
+    root_module = modules['']
+    module_path, _ = node_name_to_scope[node_name]
+    scale_node = _create_getattr_from_value(root_module, quantized_graph, (module_path + "_scale_"), scale)
+    zero_point_node = _create_getattr_from_value(root_module, quantized_graph, (module_path + "_zero_point_"), zero_point)
+    return (scale_node, zero_point_node)
+
+
+def _all_node_args_have_no_tensors(node: Node, modules: Dict[str, torch.nn.Module], cache: Dict[Node, bool]) -> bool:
     """
     If we know for sure that all of this node's args have no
     tensors (are primitives), return True.  If we either
@@ -251,11 +346,11 @@ def all_node_args_have_no_tensors(node: Node, modules: Dict[str, torch.nn.Module
     elif node.op == 'call_module':
         assert isinstance(node.target, str)
         if is_activation_post_process(modules[node.target]):
-            result = all_node_args_have_no_tensors(node.args[0], modules, cache)  # type: ignore[arg-type]
+            result = _all_node_args_have_no_tensors(node.args[0], modules, cache)  # type: ignore[arg-type]
     elif node.op == 'call_module':
         result = False
     elif node.op == 'call_function' and node.target is operator.getitem:
-        result = all_node_args_have_no_tensors(node.args[0], modules, cache)  # type: ignore[arg-type]
+        result = _all_node_args_have_no_tensors(node.args[0], modules, cache)  # type: ignore[arg-type]
     elif node.op == 'get_attr':
         result = False
     elif node.target is getattr and node.args[1] in ['ndim', 'shape']:
@@ -271,7 +366,7 @@ def all_node_args_have_no_tensors(node: Node, modules: Dict[str, torch.nn.Module
                 for list_el in arg:
                     if isinstance(list_el, Node):
                         this_list_el_args_have_no_tensors = \
-                            all_node_args_have_no_tensors(list_el, modules, cache)
+                            _all_node_args_have_no_tensors(list_el, modules, cache)
                         found_one_tensor = found_one_tensor or \
                             (not this_list_el_args_have_no_tensors)
                         # If found_one_tensor is True, there is no point in
@@ -288,7 +383,7 @@ def all_node_args_have_no_tensors(node: Node, modules: Dict[str, torch.nn.Module
                 pass
             else:
                 if isinstance(arg, Node):
-                    this_arg_args_have_no_tensors = all_node_args_have_no_tensors(arg, modules, cache)
+                    this_arg_args_have_no_tensors = _all_node_args_have_no_tensors(arg, modules, cache)
                     found_one_tensor = found_one_tensor or \
                         (not this_arg_args_have_no_tensors)
                     # If found_one_tensor is True, there is no point in
@@ -308,13 +403,13 @@ def all_node_args_have_no_tensors(node: Node, modules: Dict[str, torch.nn.Module
         cache[node] = result
     return result
 
-def all_node_args_except_first(node: Node) -> List[int]:
+def _all_node_args_except_first(node: Node) -> List[int]:
     """
     Returns all node arg indices after first
     """
     return list(range(1, len(node.args)))
 
-def return_arg_list(arg_indices: List[int]) -> Callable[[Node], List[int]]:
+def _return_arg_list(arg_indices: List[int]) -> Callable[[Node], List[int]]:
     """
     Constructs a function that takes a node as arg and returns the arg_indices
     that are valid for node.args
@@ -329,55 +424,71 @@ NodeInfo = namedtuple("NodeInfo", "op target")
 # so that they can be propagated correctly since inserting observers
 # for them would cause errors
 
-NON_OBSERVABLE_ARG_DICT: Dict[NodeInfo, Dict[Union[type, torch.dtype], Callable[[Node], List[int]]]] = {
+_NON_OBSERVABLE_ARG_DICT: Dict[NodeInfo, Dict[Union[type, torch.dtype], Callable[[Node], List[int]]]] = {
     NodeInfo("call_method", "masked_fill") : {
-        torch.bool: return_arg_list([1]),
-        float: return_arg_list([2])
+        torch.bool: _return_arg_list([1]),
+        float: _return_arg_list([2])
     },
     NodeInfo("call_method", "permute") : {
-        int: all_node_args_except_first
+        int: _all_node_args_except_first
     },
     NodeInfo("call_method", "repeat") : {
-        int: all_node_args_except_first
+        int: _all_node_args_except_first
     },
     NodeInfo("call_method", "reshape") : {
-        int: all_node_args_except_first
+        int: _all_node_args_except_first
     },
     NodeInfo("call_method", "size") : {
-        int: return_arg_list([1])
+        int: _return_arg_list([1])
     },
     NodeInfo("call_method", "transpose") : {
-        int: all_node_args_except_first
+        int: _all_node_args_except_first
     },
     NodeInfo("call_method", torch.transpose) : {
-        int: all_node_args_except_first
+        int: _all_node_args_except_first
     },
     NodeInfo("call_method", "unsqueeze") : {
-        int: return_arg_list([1])
+        int: _return_arg_list([1])
     },
     NodeInfo("call_method", "unsqueeze_") : {
-        int: return_arg_list([1])
+        int: _return_arg_list([1])
     },
     NodeInfo("call_method", torch.unsqueeze) : {
-        int: return_arg_list([1])
+        int: _return_arg_list([1])
     },
     NodeInfo("call_method", "view") : {
-        int: all_node_args_except_first
+        int: _all_node_args_except_first
     },
 }
 
-EMPTY_ARG_DICT: Dict[Union[type, torch.dtype], Callable[[Node], List[int]]] = {}
+_EMPTY_ARG_DICT: Dict[Union[type, torch.dtype], Callable[[Node], List[int]]] = {}
 
-def get_non_observable_arg_indexes_and_types(node: Node) -> Dict[Union[type, torch.dtype], Callable[[Node], List[int]]]:
+def _get_non_observable_arg_indexes_and_types(node: Node) -> Dict[Union[type, torch.dtype], Callable[[Node], List[int]]]:
     """
     Returns a dict with of non float tensor types as keys and values which correspond to a
     function to retrieve the list (which takes the node as an argument)
     """
     info = NodeInfo(node.op, node.target)
 
-    return NON_OBSERVABLE_ARG_DICT.get(info, EMPTY_ARG_DICT)
+    return _NON_OBSERVABLE_ARG_DICT.get(info, _EMPTY_ARG_DICT)
 
-def maybe_get_next_module(
+def _node_return_type_is_int(node: Node) -> bool:
+    """
+    Returns true if this node results in an integer, even if some of the args
+    are Tensors.
+    """
+    return node.op == 'call_method' and node.target == 'size'
+
+
+def _is_get_tensor_info_node(node: Node) -> bool:
+    """ Returns True if this node is a node that takes a Tensor as input and output some
+    meta information about the Tensor, e.g. shape, size etc.
+    """
+    result: bool = \
+        node.op == "call_function" and node.target == getattr and node.args[1] == "shape"  # type: ignore[assignment]
+    return result
+
+def _maybe_get_next_module(
     node: Node,
     modules: Dict[str, nn.Module],
     target_module_type: Optional[Type[nn.Module]] = None,
@@ -402,7 +513,7 @@ def maybe_get_next_module(
 
     return None
 
-def create_node_from_old_node_preserve_meta(
+def _create_node_from_old_node_preserve_meta(
     quantized_graph: Graph,
     create_node_args: Tuple[Any, ...],
     old_node: Node,
@@ -414,7 +525,7 @@ def create_node_from_old_node_preserve_meta(
     new_node.stack_trace = old_node.stack_trace
     return new_node
 
-def get_skipped_module_name_and_classes(
+def _get_skipped_module_name_and_classes(
         prepare_custom_config: PrepareCustomConfig,
         is_standalone_module: bool) -> Tuple[List[str], List[Type[Any]]]:
     skipped_module_names = copy.copy(prepare_custom_config.non_traceable_module_names)
@@ -423,7 +534,7 @@ def get_skipped_module_name_and_classes(
         # standalone module and custom module config are applied in top level module
         skipped_module_names += list(prepare_custom_config.standalone_module_names.keys())
         skipped_module_classes += list(prepare_custom_config.standalone_module_classes.keys())
-        skipped_module_classes += get_custom_module_class_keys(prepare_custom_config.float_to_observed_mapping)
+        skipped_module_classes += _get_custom_module_class_keys(prepare_custom_config.float_to_observed_mapping)
 
     return skipped_module_names, skipped_module_classes
 
@@ -466,7 +577,7 @@ def _insert_dequant_stub(
     `DeQuantStub` on the output of `node`, similar to how observers are inserted.
     """
     prefix = "dequant_stub_"
-    get_new_dequant_stub_name = get_new_attr_name_with_prefix(prefix)
+    get_new_dequant_stub_name = _get_new_attr_name_with_prefix(prefix)
     dequant_stub_name = get_new_dequant_stub_name(model)
     dequant_stub = DeQuantStub()
     setattr(model, dequant_stub_name, dequant_stub)

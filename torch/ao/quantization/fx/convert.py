@@ -50,11 +50,12 @@ from torch.nn.utils.parametrize import type_before_parametrizations
 from .utils import (
     _get_module,
     _is_custom_module_lstm,
-    get_custom_module_class_keys,
-    create_getattr_from_value,
-    collect_producer_nodes,
-    graph_module_from_producer_nodes,
-    node_arg_is_weight,
+    _get_custom_module_class_keys,
+    _get_quantize_node_info,
+    _create_getattr_from_value,
+    _collect_producer_nodes,
+    _graph_module_from_producer_nodes,
+    _node_arg_is_weight,
 )
 from torch.ao.quantization.utils import (
     is_per_channel,
@@ -474,12 +475,12 @@ def _run_weight_observers(observed: GraphModule, backend_config: BackendConfig) 
             continue
         for node_arg in node.args:
             # node_arg is weight
-            if node_arg and node_arg_is_weight(node, node_arg, backend_config):
-                weight_observer_nodes = collect_producer_nodes(node_arg)
+            if node_arg and _node_arg_is_weight(node, node_arg, backend_config):
+                weight_observer_nodes = _collect_producer_nodes(node_arg)
                 if weight_observer_nodes is None:
                     continue
                 weight_observer_module = \
-                    graph_module_from_producer_nodes(
+                    _graph_module_from_producer_nodes(
                         observed, weight_observer_nodes)
                 # run the weight observer
                 weight_observer_module()
@@ -936,7 +937,7 @@ def convert(
                     "but {} was updated to {}".format(k, v, convert_node_name_to_qconfig[k])
         node_name_to_qconfig = convert_node_name_to_qconfig
 
-    custom_module_classes = get_custom_module_class_keys(convert_custom_config.observed_to_quantized_mapping)
+    custom_module_classes = _get_custom_module_class_keys(convert_custom_config.observed_to_quantized_mapping)
     custom_module_class_mapping = convert_custom_config.observed_to_quantized_mapping
 
     if model._equalization_node_name_to_qconfig is not None:
