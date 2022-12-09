@@ -2,7 +2,8 @@ FROM arm32v7/python:3.7.15-buster
 
 WORKDIR /app
 
-RUN git clone -b release/1.11 --recursive https://github.com/polzounov/pytorch && \
+# Important to use that fork (changed CMakeList.txt) and branch release/1.11
+RUN git clone --recursive https://github.com/polzounov/pytorch && \
 	cd pytorch && \
 	git submodule sync && \
 	git submodule update --init --recursive --jobs 0
