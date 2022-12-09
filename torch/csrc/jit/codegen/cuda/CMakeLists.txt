@@ -186,14 +186,12 @@ if(BUILD_PYTHON)
       )
   endif()
 
-  target_link_libraries(${NVFUSER_PYTHON} PRIVATE ${NVFUSER_CODEGEN} torch torch_python ${TORCHLIB_FLAVOR} pybind::pybind11)
+  target_link_libraries(${NVFUSER_PYTHON} PRIVATE ${NVFUSER_CODEGEN} torch torch_python ${TORCHLIB_FLAVOR} python::python pybind::pybind11)
   if(NOT MSVC)
     target_compile_options(${NVFUSER_PYTHON} PRIVATE -Wno-unused-variable)
   endif()
   target_include_directories(${NVFUSER_PYTHON}
                          PRIVATE ${TORCH_ROOT})
-                 #PRIVATE ${pybind11_INCLUDE_DIRS}
-                           #PRIVATE ${PYTHON_INCLUDE_DIRS})
   target_compile_options(${NVFUSER_PYTHON} PRIVATE ${TORCH_PYTHON_COMPILE_OPTIONS})
   if(TORCH_PYTHON_LINK_FLAGS AND NOT TORCH_PYTHON_LINK_FLAGS STREQUAL "")
     message(STATUS "somehow this is happening")
